@@ -1,67 +1,109 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/select.h>
 #include <sys/inotify.h>
 
+#define WD_NUM 3
 #define BUFSZ   16384
+#define EVENT_NUM 16
+#define MAX_BUF_SIZE 1024
 
-static void errexit(const char *s) {
-    fprintf(stderr, "%s\n", s);
-    exit(1);
-}
+struct wd_name {
+    int wd;
+    char * name;
+};
+struct wd_name wd_array[WD_NUM];
 
+char * event_array[] = {
+    "File was accessed", 
+    "File was modified",
+    "File attributes were changed",
+    "writtable file closed",
+    "Unwrittable file closed",
+    "File was opened",
+    "File was moved from X",
+    "File was moved to Y",
+    "Subfile was created",
+    "Subfile was deleted",
+    "Self was deleted",
+    "Self was moved",
+    "",
+    "Backing fs was unmounted",
+    "Event queued overflowed",
+    "File was ignored"
+};
+     
 int main(int argc, char* argv[]) {
-    int ifd, wd, i, n;
-    char buf[BUFSZ];
-
-    if (2 != argc) {
-        printf("usage: file_del_monitor <filename>");
+    if (argc < 2) {
+        printf("usage: ./monitro_test <filename> [ filename ...]");
         return 0;
     }
+     
+    int fd;
+    fd = inotify_init();
+    if (fd < 0) {
+        printf("Fail to initialize inotify.\n");
+        exit(-1);
+    }
 
-    ifd = inotify_init();
-    if (ifd < 0)
-        errexit("cannot obtain an inotify instance");
-
-    char* filename = argv[1];
-
-    wd = inotify_add_watch(ifd, filename, IN_MODIFY|IN_CREATE|IN_DELETE|IN_MOVE);
-    if (wd < 0)
-        errexit("cannot add inotify watch");
-
-    int outter_idx = 0;
-    while (1) {
-        n = read(ifd, buf, sizeof(buf));
-        if (n <= 0) {
-            errexit("read problem");
+    // add monitor for files
+    int wd;
+    int i = 0;
+    for (i=0; i<argc-1; i++) {
+        wd_array[i].name = argv[i+1];
+        wd = inotify_add_watch(fd, wd_array[i].name, IN_ALL_EVENTS);
+        if (wd < 0) {
+            printf("Can't add watch for %s.\n", wd_array[i].name);
+            exit(-1);
         }
-        printf("Some event happens, len:%d\n", n);
+        wd_array[i].wd = wd;
+    }
 
-        i = 0;
-        int inner_idx = 0;
-        while (i < n) {
-            struct inotify_event *ev;
+    // monitor all status. when no event happen, read will block
+    char buffer[1024];
+    char * offset = NULL;
+    struct inotify_event * event;
+    int r_len, extra_event_size;
+    char strbuf[16];
+    while(r_len = read(fd, buffer, MAX_BUF_SIZE)) {
+        offset = buffer;
+        // printf("Some event happens, r_len = %d.\n", r_len);
+        event = (struct inotify_event *)buffer;
+        while (((char *)event - buffer) < r_len) {
 
-            ev = (struct inotify_event *)(&buf[i]);
-            printf("%d name:%s\n", inner_idx, ev->name);
-            /*
-            if (ev->len) {
-                if (ev->mask & IN_CREATE) {
-                    printf("file %s is created\n", ev->name);
-                } else if (ev->mask & IN_DELETE) {
-                    printf("file %s is deleted\n", ev->name);
-                } else if (ev->mask & IN_MODIFY) {
-                    printf("file %s is modify\n", ev->name);
-                } else if (ev->mask & IN_MOVE) {
-                    printf("file %s is move\n", ev->name);
-                } else {
-                    printf("file %s is modify\n", ev->name);
+            // file type
+            if (event->mask & IN_ISDIR) {
+                memcpy(strbuf, "Direcotory", 11);
+            } else {
+                memcpy(strbuf, "File", 5);
+            }
+            printf("Object type: %s\n", strbuf);
+
+            // file name
+            for (i=0; i<WD_NUM; i++) {
+                if (event->wd != wd_array[i].wd) {
+                    continue;
+                }
+                printf("Object name: %s\n", wd_array[i].name);
+                break;
+            }
+
+            // event mask
+            printf("Event mask: %08X, ", event->mask);
+            for (i=0; i<EVENT_NUM; i++) {
+                if (event_array[i][0] == '\0') continue;
+                if (event->mask & (1<<i)) {
+                    printf("%s\n", event_array[i]);
                 }
             }
-            */
-            i += sizeof(struct inotify_event) + ev->len;
+            printf("\n");
+
+            extra_event_size = sizeof(struct inotify_event) + event->len;
+            // next event
+            event = (struct inotify_event *)(offset + extra_event_size); 
+            offset += extra_event_size;
         }
-        printf("%d---\n", outter_idx++);
     }
 }
